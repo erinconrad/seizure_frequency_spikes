@@ -35,7 +35,7 @@ WIN_SAMP = round(WIN_SEC * FS);
 PATIENT_ID_OFFSET = 0;
 
 % Set to Inf for the full run, or e.g. 100 for a quick test pass.
-MAX_FILES     = 100;%Inf;
+MAX_FILES     = Inf;
 PRINT_EVERY   = 100;   % progress update interval (files)
 
 %% ===== Load clinical table (hookup_time required; duration optional) =====
