@@ -42,10 +42,10 @@ function Out = run_spike_sz_pipeline_clean()
 %   Model ....................... build_eeg_visit_pairs,
 %                                 fit_mixed_effects_models, run_bootstrap,
 %                                 add_duration_to_model
-%   Figures ..................... make_flowchart_figure, make_fig1_controls,
+%   Figures ..................... make_flowchart_figure, make_fig_controls,
 %                                 spearman_figure, draw_spearman_panel,
 %                                 make_model_figure, make_figSup_lag,
-%                                 make_figS2_sz_by_reported_spikes,
+%                                 make_fig_szfreq_by_reported_spikes,
 %                                 plot_delta_rho_histogram,
 %                                 make_eeg_duration_histogram,
 %                                 make_fig_report_bias,
@@ -96,10 +96,8 @@ CFG.MAX_ROUTINE_HOURS = 4;
 % so a floor is enforced rather than silently producing NaN intervals.
 CFG.nBoot = 5000;
 CFG.alpha = 0.05;
-%{
 assert(CFG.nBoot >= 1000, ...
     'nBoot = %d is too low; CIs and bootstrap p-values require >= 1000.', CFG.nBoot);
-%}
 
 % ---- Epsilons (two different ones on purpose) ------------------------
 % EPS_RATE only nudges exact zeros onto the log axes for DISPLAY.
@@ -178,39 +176,58 @@ MMR = fit_mixed_effects_models(PairTable, CFG);
 DurCompare = add_duration_to_model(MMR, Views, CFG.alpha);
 
 %% ===================== 5. FIGURES =====================
-% Figure numbering in the manuscript:
-%   Fig 1 = flow diagram   Fig 2 = controls      Fig 3 = Spearman
-%   Fig 4 = model          Fig S1 = Spearman non-zero
-%   Fig S2 = sz freq by reported spikes          Fig S3 = lag context
-%   Fig S4 = near/far tertiles
+% Manuscript figure numbering. Output FILENAMES now carry the figure number
+% so the two cannot drift apart (previously Fig1.png was manuscript Fig 2 and
+% FigS1.png was manuscript Fig S2).
+%
+%   MAIN          Fig 1  study schematic (not produced here)
+%                 Fig 2  detector controls
+%                 Fig 3  spike rate vs seizure frequency
+%                 Fig 4  mixed effects model
+%
+%   SUPPLEMENT    Fig S1  participant flow
+%                 Fig S2  EEG duration distribution
+%                 Fig S3  EEGs with vs without an available spike report
+%                 Fig S4  generalized-epilepsy syndromes
+%                 Fig S5  Spearman, non-zero spike rates and frequencies only
+%                 Fig S6  Spearman, top 10% of spikers removed
+%                 Fig S7  seizure frequency by reported spikes across EEGs
+%                 Fig S8  EEG-visit lag context
+%                 Fig S9  near vs far visit windows
 
+% ---- Fig S1-S4: cohort, measurement and bias supplements ----
 FigFlow = make_flowchart_figure(Views, MMR);
-save_fig(FigFlow, f('FigFlow.png'));
+save_fig(FigFlow, f('FigS1_flow.png'));
 
-[Fig1, Fig1Stats] = make_fig1_controls(Views, CFG);
-save_fig(Fig1, f('Fig1.png'));
+[FigDur, DurStats] = make_eeg_duration_histogram(Views, f('FigS2_eeg_duration.png'));
 
-% Main Spearman (all patients) and the non-zero-only supplement.
+[FigBias, BiasStats] = make_fig_report_bias(Views, SzFreq, CFG, ...
+    f('FigS3_report_bias.png'));
+
+[GenSub, FigGenSub] = make_fig_generalized_subtypes(Views, CFG, ...
+    f('FigS4_generalized_subtypes.png'), 10, false);
+
+% ---- Fig 2: detector controls ----
+[FigControls, ControlStats] = make_fig_controls(Views, CFG);
+save_fig(FigControls, f('Fig2_controls.png'));
+
+% ---- Fig 3 and its two sensitivity supplements (Fig S5, Fig S6) ----
 SP.main = spearman_figure(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
-    CFG, f('Fig2.png'), '', false);
+    CFG, f('Fig3_spearman.png'), '', false);
 SP.nz   = spearman_figure(Views.PatientSpikeSz_All, Views.PatientSpikeSz_Typed, ...
-    CFG, f('FigS1.png'), ' (positive spike/seizures only)', true);
+    CFG, f('FigS5_spearman_nonzero.png'), ' (positive spike/seizures only)', true);
+SP.trim = spearman_trim_top_spikers(Views, CFG, ...
+    f('FigS6_spearman_trim10.png'), 0.10, false);
 
-FigMain  = make_model_figure(MMR, f('FigModel.png'));
-FigSupLag = make_figSup_lag(MMR, Vuniq, CFG, f('FigSupLag.png'));
+% ---- Fig S7: patient-level companion to Fig 2A ----
+FigSzByReport = make_fig_szfreq_by_reported_spikes(Views, SzFreq, CFG);
+save_fig(FigSzByReport, f('FigS7_szfreq_by_reported_spikes.png'));
 
-FigS2 = make_figS2_sz_by_reported_spikes(Views, SzFreq, CFG);
-save_fig(FigS2, f('FigS2.png'));
-
-NearFar = plot_delta_rho_histogram(Views, Vuniq, Views.ReportForKeptSessions, ...
-    0.333, 0.667, CFG, f('FigSTertile.png'));
-
-% ---- Sensitivity / diagnostic figures (not in the main manuscript) ----
-FigDur  = make_eeg_duration_histogram(Views, f('FigDuration.png'));
-[FigBias, BiasStats] = make_fig_report_bias(Views, SzFreq, CFG, f('FigReportBias.png'));
-[GenSub, FigGenSub]  = make_fig_generalized_subtypes(Views, CFG, ...
-    f('FigGenSubtypes.png'), 10, false);
-SP.trim = spearman_trim_top_spikers(Views, CFG, f('FigS1_trim10.png'), 0.10, false);
+% ---- Fig 4 and its context supplements (Fig S8, Fig S9) ----
+FigMain   = make_model_figure(MMR, f('Fig4_model.png'));
+FigSupLag = make_figSup_lag(MMR, Vuniq, CFG, f('FigS8_lag_context.png'));
+NearFar   = plot_delta_rho_histogram(Views, Vuniq, Views.ReportForKeptSessions, ...
+    0.333, 0.667, CFG, f('FigS9_near_far_tertiles.png'));
 
 %% ===================== 6. TABLES AND TEXT =====================
 Table1 = build_table1_flat(Views, SzFreq, Vuniq, CFG);
@@ -218,18 +235,22 @@ writetable(Table1, f('Table1.csv'));
 
 write_tableS1(MMR, f('TableS1.csv'));
 
-write_results_html(f('results_summary.html'), Views, SzFreq, Fig1Stats, ...
-    SP, MMR, Vuniq, NearFar, CFG);
+% Supp carries the numbers that the new supplemental sentences need.
+Supp = struct('Duration',DurStats, 'Bias',BiasStats, 'GenSub',GenSub, 'Trim',SP.trim);
+write_results_html(f('results_summary.html'), Views, SzFreq, ControlStats, ...
+    SP, MMR, Vuniq, NearFar, Supp, CFG);
 
 %% ===================== 7. RETURN EVERYTHING =====================
 % Bundled so the whole run can be inspected from one variable.
 Out = struct('CFG',CFG, 'Views',Views, 'Vuniq',Vuniq, 'SzFreq',SzFreq, ...
     'PairTable',PairTable, 'MMR',MMR, 'DurCompare',DurCompare, ...
     'Spearman',SP, 'NearFar',NearFar, 'GenSubtypes',GenSub, ...
-    'BiasStats',BiasStats, 'Fig1Stats',Fig1Stats, 'Table1',Table1, ...
-    'Figures',struct('Flow',FigFlow,'Fig1',Fig1,'Model',FigMain, ...
-                     'SupLag',FigSupLag,'FigS2',FigS2,'Duration',FigDur, ...
-                     'Bias',FigBias,'GenSub',FigGenSub));
+    'BiasStats',BiasStats, 'DurStats',DurStats, ...
+    'ControlStats',ControlStats, 'Table1',Table1, ...
+    'Figures',struct('S1_Flow',FigFlow, 'S2_Duration',FigDur, ...
+                     'S3_Bias',FigBias, 'S4_GenSub',FigGenSub, ...
+                     'F2_Controls',FigControls, 'F4_Model',FigMain, ...
+                     'S7_SzByReport',FigSzByReport, 'S8_Lag',FigSupLag));
 
 fprintf('\nDone. Outputs in %s\n', P.outDir);
 end
@@ -1112,7 +1133,7 @@ text(ax, CX, 0.97, 'Study participant flow', 'HorizontalAlignment','center', ...
 end
 
 
-function [f1, Fig1Stats] = make_fig1_controls(Views, CFG)
+function [f1, ControlStats] = make_fig_controls(Views, CFG)
 %MAKE_FIG1_CONTROLS  Two sanity checks on the automated spike detector.
 %
 %   A  EEG level. Do detected spike rates track what the reading physician
@@ -1123,7 +1144,7 @@ function [f1, Fig1Stats] = make_fig1_controls(Views, CFG)
 % REVIEW: panel A treats each EEG as independent, but patients can contribute
 % several. If a reviewer presses on this, a patient-level version (each
 % patient's median rate, split by whether any EEG reported spikes) is the
-% natural companion; Fig S2 is already close to that.
+% natural companion; Fig S7 is already close to that.
 
 Y_ZERO = log10(CFG.EPS_RATE);
 Y_LIMS = CFG.Y_LIMS;
@@ -1188,7 +1209,7 @@ finish_panel(axB, 'B. Epilepsy subtype', string(Views.Canonical3_Stats.EpiType4)
     Views.Canonical3_Stats.GroupCount, 20, 0.02);
 
 %% --- Stats bundle ---
-Fig1Stats = struct( ...
+ControlStats = struct( ...
     'p_rankSum_A', pA, 'effectA_cliff', effectA, ...
     'm_pre', med_pre, 'lo_pre', lo_pre, 'hi_pre', hi_pre, ...
     'm_abs', med_abs, 'lo_abs', lo_abs, 'hi_abs', hi_abs, ...
@@ -1541,7 +1562,7 @@ save_fig(FigSup, outPath);
 end
 
 
-function fS2 = make_figS2_sz_by_reported_spikes(Views, SzFreq, CFG)
+function fig = make_fig_szfreq_by_reported_spikes(Views, SzFreq, CFG)
 %MAKE_FIGS2_SZ_BY_REPORTED_SPIKES  Patient-level companion to Fig 1A.
 %
 % Splits patients by whether ANY of their EEGs had clinically reported spikes,
@@ -1564,7 +1585,7 @@ freqAbsent  = freqAbsent(isfinite(freqAbsent));
 freqPresent = freqPresent(isfinite(freqPresent));
 
 p = ranksum(freqAbsent, freqPresent, 'method','approx');
-d = cliff_delta(freqPresent, freqAbsent);   % same sign convention as Fig 1A
+d = cliff_delta(freqPresent, freqAbsent);   % same sign convention as Fig 2A
 [m1, lo1, hi1] = bootstrap_median_ci(freqAbsent,  CFG.nBoot, CFG.alpha);
 [m2, lo2, hi2] = bootstrap_median_ci(freqPresent, CFG.nBoot, CFG.alpha);
 
@@ -1575,8 +1596,8 @@ G = categorical([repmat("All EEGs: no spikes",   numel(freqAbsent),1); ...
 Y = jitter_at_floor(log10_floor([freqAbsent; freqPresent], CFG.EPS_FREQ), ...
     Y_ZERO, Y_LIMS, 0.02);
 
-fS2 = figure('Color','w','Position',[100 100 800 520]);
-ax  = axes(fS2);
+fig = figure('Color','w','Position',[100 100 800 520]);
+ax  = axes(fig);
 box_swarm_panel(ax, G, Y, Y_ZERO, Y_LIMS, CFG.EPS_FREQ, 'Seizures/month (log scale)');
 add_median_ci_overlay(ax, 1, m1, lo1, hi1, CFG.EPS_FREQ);
 add_median_ci_overlay(ax, 2, m2, lo2, hi2, CFG.EPS_FREQ);
@@ -1592,7 +1613,7 @@ finish_panel(ax, 'Mean seizure frequency by reported spikes across EEGs', ...
     ["All EEGs: no spikes","At least 1 EEG: spikes"], ...
     [numel(freqAbsent) numel(freqPresent)], 20, 0.03);
 
-fprintf(['\n[Fig S2] Median [95%% CI] seizure frequency: %.2f [%.2f-%.2f] (no spikes) ' ...
+fprintf(['\n[Fig S7] Median [95%% CI] seizure frequency: %.2f [%.2f-%.2f] (no spikes) ' ...
     'vs %.2f [%.2f-%.2f] (spikes present); %s, Cliff''s d = %.2f\n'], ...
     m1, lo1, hi1, m2, lo2, hi2, p_label(p), d);
 end
@@ -1730,7 +1751,7 @@ set([ax1 ax2], 'FontSize',20);
 
 save_fig(fig, outPng);
 
-fprintf(['\n[Fig S4] N = %d patients; rho short gap = %.2f, long gap = %.2f; ' ...
+fprintf(['\n[Fig S9] N = %d patients; rho short gap = %.2f, long gap = %.2f; ' ...
     'delta = %.3f [%.2f-%.2f], one-sided p = %.4f\n'], ...
     n, rho_near, rho_far, delta_obs, ci_lo, ci_hi, p_one);
 
@@ -1777,12 +1798,15 @@ end
 end
 
 
-function figH = make_eeg_duration_histogram(Views, outPath)
-%MAKE_EEG_DURATION_HISTOGRAM  File duration vs Natus duration for cohort EEGs.
+function [figH, DurStats] = make_eeg_duration_histogram(Views, outPath)
+%MAKE_EEG_DURATION_HISTOGRAM  Fig S2. File vs Natus duration for cohort EEGs.
 %
 % The file duration is the full EDF span; the Natus duration clips segments
 % recorded before the electrodes were connected. The difference between them
 % is the "clipped" time that motivates the deadtime correction.
+%
+% DurStats feeds the EEG-duration row of Table 1 and the cohort paragraph of
+% the results HTML, so those two can never disagree with this figure.
 
 FONT = 20;
 COL_FILE  = [0.22 0.45 0.70];
@@ -1835,6 +1859,12 @@ fprintf(['[Durations] File median %.1f (IQR %.1f-%.1f) min; ' ...
     median(fileMin),  prctile(fileMin,25),  prctile(fileMin,75), ...
     median(natusMin), prctile(natusMin,25), prctile(natusMin,75), ...
     median(clip), prctile(clip,25), prctile(clip,75), nnz(paired));
+
+DurStats = struct( ...
+    'nEEG',        height(D), ...
+    'file_med',    median(fileMin),  'file_q', prctile(fileMin,  [25 75]), ...
+    'natus_med',   median(natusMin), 'natus_q',prctile(natusMin, [25 75]), ...
+    'clip_med',    median(clip),     'clip_q', prctile(clip,     [25 75]));
 
 save_fig(figH, outPath);
 end
@@ -2146,6 +2176,13 @@ docVec = per_patient(Vc.Patient, Vc.Freq_R1, @(f) 100*mean(isfinite(f)), allPati
 eegVec = per_patient(Views.SessionsForFigures.Patient, ...
     Views.SessionsForFigures.Session, @(x) numel(unique(x)), allPatients);
 
+% EEG duration is summarised across EEGs, not across patients, so it is taken
+% straight from the session table rather than through per_patient. This uses
+% whichever duration DURATION_SOURCE selected, i.e. the one spike rates were
+% actually computed from.
+durMin = double(Views.SessionsForFigures.(CFG.durCol)) / 60;
+durMin = durMin(isfinite(durMin));
+
 %% --- Outcome distributions ---
 sfVec = SzFreq.MeanSzFreq(ismember(SzFreq.Patient, allPatients));
 sfVec = sfVec(isfinite(sfVec));
@@ -2185,6 +2222,7 @@ R = [ ...
     row("Follow-up duration (years)",        mq(fuVec,  '%.1f (%.1f-%.1f)'));
     row("Visits with documented seizure frequency", mq(docVec, '%.1f%% (%.1f-%.1f)'));
     row("Number of EEGs",                    mq(eegVec, '%.1f (%.1f-%.1f)'));
+    row("EEG duration (minutes, across EEGs)", mq(durMin, '%.1f (%.1f-%.1f)'));
     row("Mean seizure frequency (seizures/month)", ...
         sprintf('%.2f (%.2f-%.2f); median CI [%.2f-%.2f]', median(sfVec,'omitnan'), ...
             prctile(sfVec,25), prctile(sfVec,75), sf_lo, sf_hi));
@@ -2241,13 +2279,20 @@ writetable(cell2table(rows, 'VariableNames', ...
 end
 
 
-function write_results_html(outPath, Views, SzFreq, Fig1Stats, SP, MMR, Vuniq, NearFar, CFG)
+function write_results_html(outPath, Views, SzFreq, ControlStats, SP, MMR, ...
+    Vuniq, NearFar, Supp, CFG)
 %WRITE_RESULTS_HTML  Draft results text with every number filled in from the
 % live analysis, so the manuscript can be updated by copy-paste.
 %
-% Manuscript figure numbers: Fig 1 flow, Fig 2 controls, Fig 3 Spearman,
-% Fig 4 model, Fig S1 non-zero Spearman, Fig S2 sz-by-reported-spikes,
-% Fig S3 lag context, Fig S4 near/far tertiles.
+% Figure numbers used here match the driver's numbering block:
+%   Fig 2 controls, Fig 3 Spearman, Fig 4 model;
+%   Fig S1 flow, S2 EEG duration, S3 report availability, S4 generalized
+%   syndromes, S5 non-zero Spearman, S6 trimmed Spearman,
+%   S7 sz-by-reported-spikes, S8 lag context, S9 near/far tertiles.
+%
+% Sentences about the new supplements are written so the WORDING follows the
+% data (see similar_or_differed): if a comparison turns out significant, the
+% text will say "differed from" rather than silently asserting similarity.
 
 fid = fopen(outPath, 'w');
 assert(fid ~= -1, 'Could not open %s for writing.', outPath);
@@ -2280,7 +2325,8 @@ fprintf(fid, ['<p>Of %d patients with EEG data in the Penn Epilepsy Center datab
     '%d were excluded because their EEG was not an outpatient routine recording of ' ...
     'less than 4 hours, %d were excluded without an LLM-confirmed epilepsy diagnosis, ' ...
     'and %d were excluded without a documented seizure frequency at any clinic visit, ' ...
-    'yielding a final cohort of %d patients with %d EEGs (Fig. 1). ' ...
+    'yielding a final cohort of %d patients with %d EEGs (Fig. S1). ' ...
+    'Median EEG duration was %.0f minutes (IQR %.0f&ndash;%.0f; Fig. S2). ' ...
     'Median follow-up from first to last clinic visit was %.1f years (IQR %.1f&ndash;%.1f). ' ...
     'Across patients, a median of %.1f%% (IQR %.1f&ndash;%.1f%%) of clinic visits had a ' ...
     'documented seizure frequency. %d patients (%.1f%%) had spikes reported on at least ' ...
@@ -2288,6 +2334,7 @@ fprintf(fid, ['<p>Of %d patients with EEG data in the Penn Epilepsy Center datab
     'spikes/hour was %.2f [%.2f-%.2f] (Table 1).</p>\n'], ...
     EC.nTotal, EC.nTotal - EC.nAfterOutptRoutine, EC.nExcludedNoEpilepsy, ...
     EC.nExcludedNoSzFreq, N, nEEG, ...
+    Supp.Duration.file_med, Supp.Duration.file_q(1), Supp.Duration.file_q(2), ...
     median(fu,'omitnan'),  prctile(fu,25),  prctile(fu,75), ...
     median(doc,'omitnan'), prctile(doc,25), prctile(doc,75), ...
     nPatPresent, 100*nPatPresent/numel(pidRS), ...
@@ -2298,12 +2345,28 @@ fprintf(fid, '<h2>Spike rates by patient groups</h2>\n');
 fprintf(fid, ['<p>Detected spike rates were higher in EEGs with clinically-reported spikes ' ...
     '(median %.2f [95%% CI %.2f-%.2f] spikes/hour) than without (%.2f [%.2f-%.2f] ' ...
     'spikes/hour) (%s, Cliff''s &delta;=%.2f; Fig. 2A). '], ...
-    Fig1Stats.m_pre, Fig1Stats.lo_pre, Fig1Stats.hi_pre, ...
-    Fig1Stats.m_abs, Fig1Stats.lo_abs, Fig1Stats.hi_abs, ...
-    format_p_html(Fig1Stats.p_rankSum_A), Fig1Stats.effectA_cliff);
+    ControlStats.m_pre, ControlStats.lo_pre, ControlStats.hi_pre, ...
+    ControlStats.m_abs, ControlStats.lo_abs, ControlStats.hi_abs, ...
+    format_p_html(ControlStats.p_rankSum_A), ControlStats.effectA_cliff);
+
+% Report availability. Wording adapts to the p-values rather than presuming
+% the null; note this comparison is at the EEG level, not the patient level.
+B = Supp.Bias;
+verb = similar_or_differed( ...
+    [B.SpikeRate.p_ranksum, B.SzFreq.p_ranksum, B.EpiType.p], CFG.alpha);
+fprintf(fid, ['EEGs for which the reported presence or absence of spikes was ' ...
+    'unavailable (N=%d) %s those with an available report (N=%d) in automatically ' ...
+    'detected spike rate (%s, Cliff''s &delta;=%.2f), seizure frequency ' ...
+    '(%s, &delta;=%.2f), and epilepsy subtype distribution ' ...
+    '(&chi;&sup2;(%d)=%.1f, %s; Fig. S3). '], ...
+    B.nNoReport, verb, B.nWithReport, ...
+    format_p_html(B.SpikeRate.p_ranksum), B.SpikeRate.cliff_delta, ...
+    format_p_html(B.SzFreq.p_ranksum),    B.SzFreq.cliff_delta, ...
+    B.EpiType.df, B.EpiType.chi2, format_p_html(B.EpiType.p));
+
 fprintf(fid, ['Spike rates differed across epilepsy subtypes, with the highest rates in ' ...
     'generalized epilepsy (Kruskal-Wallis %s, &eta;&sup2;&asymp;%.3f; Fig. 2B).</p>\n'], ...
-    format_p_html(Fig1Stats.p_kw_C), Fig1Stats.eta2_kw_C);
+    format_p_html(ControlStats.p_kw_C), ControlStats.eta2_kw_C);
 
 %% ---------------- Figure 3 (Spearman) ----------------
 % Rows are looked up by group NAME, so reordering canonical3 cannot silently
@@ -2326,13 +2389,31 @@ fprintf(fid, ['Subtype-specific correlations were significant for generalized ep
     tem.N, tem.Spearman_r, tem.ci_lo, tem.ci_hi, format_p_html(tem.p_bonf), ...
     fro.N, fro.Spearman_r, fro.ci_lo, fro.ci_hi, format_p_html(fro.p_bonf));
 
+% Generalized-epilepsy syndromes. Listed descriptively; the numbers, not an
+% adjective, carry the message.
+Gs = Supp.GenSub(Supp.GenSub.Group ~= "All generalized", :);
+fprintf(fid, 'Correlations within individual generalized-epilepsy syndromes are shown in Fig. S4 (');
+for i = 1:height(Gs)
+    if i < height(Gs), sep = '; '; else, sep = '). '; end
+    fprintf(fid, '%s: N=%d, &rho;=%.2f [%.2f-%.2f], Bonferroni-adjusted %s%s', ...
+        Gs.Group(i), Gs.N(i), Gs.Spearman_rho(i), Gs.ci_lo(i), Gs.ci_hi(i), ...
+        format_p_html(Gs.p_bonf(i)), sep);
+end
+
 temNZ = getG(SP.nz.Results, "Temporal");
 fprintf(fid, ['When restricting to patients with non-zero spike rates and seizure ' ...
     'frequencies, results were similar, although the temporal epilepsy correlation was ' ...
     'no longer significant in this subgroup (Bonferroni-adjusted %s) despite a similar ' ...
-    'magnitude (&rho;=%.2f [%.2f-%.2f]; Fig. S1). '], ...
+    'magnitude (&rho;=%.2f [%.2f-%.2f]; Fig. S5). '], ...
     format_p_html(temNZ.p_bonf), temNZ.Spearman_r, temNZ.ci_lo, temNZ.ci_hi);
-fprintf(fid, 'Patients with spikes on at least one EEG had higher mean seizure frequencies (Fig. S2).</p>\n');
+
+fprintf(fid, ['After excluding the 10%% of patients with the highest spike rates, ' ...
+    'the overall correlation was &rho;=%.2f [%.2f-%.2f] (N=%d, %s; Fig. S6). '], ...
+    Supp.Trim.rho_all, Supp.Trim.ci_lo_all, Supp.Trim.ci_hi_all, ...
+    Supp.Trim.n_all, format_p_html(Supp.Trim.p_all));
+
+fprintf(fid, ['Patients with spikes on at least one EEG had higher mean seizure ' ...
+    'frequencies (Fig. S7).</p>\n']);
 
 %% ---------------- Figure 4 (model) ----------------
 fprintf(fid, '<h2>Mixed effects model</h2>\n');
@@ -2362,7 +2443,7 @@ fprintf(fid, ['<p>Seizure frequency varies over time within individuals, and we 
     'fit logistic mixed effects models on all EEG-visit pairs for patients with known ' ...
     'epilepsy subtype (N=%d pairs, %d patients), with interaction terms allowing the ' ...
     'spike-seizure association to vary with the temporal distance between EEG and visit ' ...
-    '(Fig. S3). A likelihood ratio test confirmed that these interactions jointly improved ' ...
+    '(Fig. S8). A likelihood ratio test confirmed that these interactions jointly improved ' ...
     'model fit over a model without them (&chi;&sup2;(2), %s).</p>\n'], ...
     height(MMR.ModelTable), numel(unique(MMR.ModelTable.Patient)), ...
     format_p_html(MMR.LRT_p));
@@ -2395,14 +2476,14 @@ fprintf(fid, ['Spike rates from EEGs obtained before versus after a clinic visit
     format_p_html(getP('LogSpikesPerHour:VisitAfterEEG')));
 fprintf(fid, ['Visits occurring after the EEG had lower baseline odds of seizure reporting ' ...
     '(OR=%.2f [%.2f-%.2f], %s), consistent with gradual clinical improvement over time ' ...
-    '(Fig. S3). '], r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, format_p_html(getP('VisitAfterEEG')));
+    '(Fig. S8). '], r_dir.OR, r_dir.OR_CI_lo, r_dir.OR_CI_hi, format_p_html(getP('VisitAfterEEG')));
 fprintf(fid, ['Compared with temporal lobe epilepsy, generalized epilepsy had lower baseline ' ...
     'odds of seizure reporting (OR=%.2f [%.2f-%.2f], %s), while frontal lobe epilepsy did ' ...
     'not differ significantly (OR=%.2f [%.2f-%.2f], %s). '], ...
     r_general.OR, r_general.OR_CI_lo, r_general.OR_CI_hi, format_p_html(getP('EpiType3_cat_General')), ...
     r_frontal.OR, r_frontal.OR_CI_lo, r_frontal.OR_CI_hi, format_p_html(getP('EpiType3_cat_Frontal')));
 fprintf(fid, ['Our secondary analysis also found that spike-seizure correlations were ' ...
-    'stronger for clinic visits close in time to the EEG (Fig. S4). Together, these results ' ...
+    'stronger for clinic visits close in time to the EEG (Fig. S9). Together, these results ' ...
     'confirm a positive spike rate-seizure association and suggest it is strongest when the ' ...
     'EEG is obtained close to the clinic visit, consistent with spike rates tracking ' ...
     'within-individual seizure burden over time.</p>\n']);
@@ -2414,9 +2495,9 @@ fprintf(fid, '<p>M1: %d/%d iterations converged (%.1f%%). M2: %d/%d (%.1f%%).</p
     BC.M1_nConverged, BC.M1_nTotal, 100*BC.M1_nConverged/BC.M1_nTotal, ...
     BC.M2_nConverged, BC.M2_nTotal, 100*BC.M2_nConverged/BC.M2_nTotal);
 
-%% ---------------- Fig S4 legend ----------------
-fprintf(fid, '<h2>Figure S4 legend</h2>\n');
-fprintf(fid, ['<p><strong>Fig. S4. The association between interictal spike rate and seizure ' ...
+%% ---------------- Fig S9 legend ----------------
+fprintf(fid, '<h2>Figure S9 legend</h2>\n');
+fprintf(fid, ['<p><strong>Fig. S9. The association between interictal spike rate and seizure ' ...
     'frequency is higher for clinic visits close in time to EEGs.</strong> ' ...
     '<strong>A:</strong> Distribution of the absolute time difference between clinic visits ' ...
     'and EEG recordings, taking the minimum in the case of multiple EEGs per patient. Visits ' ...
@@ -2711,6 +2792,18 @@ map = { ...
 names = string(raw);
 for i = 1:size(map,1)
     names(names == map{i,1}) = map{i,2};
+end
+end
+
+function s = similar_or_differed(pvals, alpha)
+%SIMILAR_OR_DIFFERED  Pick the verb from the data, not from the hypothesis.
+% Used for the report-availability sentence so that a significant difference
+% cannot be described as similarity.
+pvals = pvals(isfinite(pvals));
+if isempty(pvals) || all(pvals >= alpha)
+    s = 'were similar to';
+else
+    s = 'differed from';
 end
 end
 

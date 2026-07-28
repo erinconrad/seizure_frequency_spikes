@@ -3,8 +3,22 @@
 % into those falling in the leading "dead time" of the EDF vs. those falling
 % in the true recording period.
 %
-% Dead time is defined as:  deadtime_sec = (EDF duration) - (clinical duration_hms)
-% and is assumed to sit at the BEGINNING of the file.
+% NEW deadtime rule:
+%   deadtime = everything BEFORE hookup_time (seconds into the file).
+%   A detection at sample i (time i/FS) is dead time if i/FS < hookup_time,
+%   otherwise it counts as recording.
+%   If hookup_time is NaN or the session has no hookup_time, there is NO
+%   dead time and every detection counts as recording.
+%
+% hookup_time is read (in seconds) from the clinical CSV, keyed by
+% (patient_id, session_number). duration_hms is now optional and, if present,
+% is reported for reference only.
+%
+% NOTE on alignment: hookup_time is assumed to be measured from the same t=0
+% as the SpikeNet trace (start of the EDF). If hookup_time was derived from
+% annotation clock times, this holds only if the earliest annotation coincides
+% with the EDF start. Rows where hookup_time exceeds the EDF duration are
+% clamped and flagged (hookup_after_edf_end) so gross misalignments surface.
 
 %% ===== Config =====
 mainDir    = '/mnt/sauce/littlab/users/erinconr/projects/routine_eeg/output/spikenet/';
@@ -20,32 +34,46 @@ WIN_SAMP = round(WIN_SEC * FS);
 % (Patient_from_path = patient_id + PATIENT_ID_OFFSET).
 PATIENT_ID_OFFSET = 0;
 
-% Tolerance (sec) for "negative dead time" before we call it an error rather
-% than rounding noise.
-NEG_DEAD_TOL = 5;
-
 % Set to Inf for the full run, or e.g. 100 for a quick test pass.
 MAX_FILES     = Inf;
 PRINT_EVERY   = 100;   % progress update interval (files)
 
-%% ===== Load clinical durations =====
+%% ===== Load clinical table (hookup_time required; duration optional) =====
 assert(isfile(clinicalCsv), 'Clinical CSV not found: %s', clinicalCsv);
 C = readtable(clinicalCsv, 'TextType', 'string', 'VariableNamingRule', 'preserve');
 C.Properties.VariableNames = matlab.lang.makeValidName(C.Properties.VariableNames);
 
-needed = {'patient_id', 'session_number', 'duration_hms'};
+needed = {'patient_id', 'session_number', 'hookup_time'};
 assert(all(ismember(needed, C.Properties.VariableNames)), ...
     'Clinical CSV is missing one of: %s', strjoin(needed, ', '));
 
 clin_patient = double(C.patient_id) + PATIENT_ID_OFFSET;
 clin_session = double(C.session_number);
-clin_dur_sec = hms_to_seconds(C.duration_hms);
 
-ok = isfinite(clin_patient) & isfinite(clin_session) & isfinite(clin_dur_sec);
-assert(any(ok), 'No usable rows in clinical CSV (check duration_hms parsing).');
-clin_patient = clin_patient(ok);
-clin_session = clin_session(ok);
-clin_dur_sec = clin_dur_sec(ok);
+% hookup_time is already in seconds; coerce to double whether stored as
+% numeric or as text.
+if isnumeric(C.hookup_time)
+    clin_hookup_sec = double(C.hookup_time);
+else
+    clin_hookup_sec = str2double(string(C.hookup_time));
+end
+
+% Optional clinical duration, reported for reference only.
+hasDur = ismember('duration_hms', C.Properties.VariableNames);
+if hasDur
+    clin_dur_sec = hms_to_seconds(C.duration_hms);
+else
+    clin_dur_sec = nan(height(C), 1);
+end
+
+% Keep every row with a usable (patient, session); hookup may be NaN (-> no
+% dead time for that session), so it is NOT part of the filter.
+ok = isfinite(clin_patient) & isfinite(clin_session);
+assert(any(ok), 'No usable rows in clinical CSV (check patient_id/session_number).');
+clin_patient    = clin_patient(ok);
+clin_session    = clin_session(ok);
+clin_hookup_sec = clin_hookup_sec(ok);
+clin_dur_sec    = clin_dur_sec(ok);
 
 clinKey = string(clin_patient) + "_" + string(clin_session);
 [uKey, iu] = unique(clinKey, 'stable');
@@ -53,7 +81,8 @@ if numel(uKey) < numel(clinKey)
     warning('Clinical CSV has %d duplicate (patient,session) rows; keeping first.', ...
         numel(clinKey) - numel(uKey));
 end
-durMap = containers.Map(cellstr(uKey), num2cell(clin_dur_sec(iu)));
+hookupMap = containers.Map(cellstr(uKey), num2cell(clin_hookup_sec(iu)));
+durMap    = containers.Map(cellstr(uKey), num2cell(clin_dur_sec(iu)));
 
 %% ===== Find probability CSVs (same two patterns as before) =====
 f1 = dir(fullfile(mainDir, 'sub-Penn*', 'ses-*', 'sub-Penn*_ses-*_task-EEG_eeg_*.csv'));
@@ -77,10 +106,10 @@ nToDo = numel(files);
 
 %% ===== Schema =====
 varNames = {'EEG_Name', 'Patient', 'Session', ...
-    'EDF_Duration_sec', 'Recorded_Duration_sec', 'Deadtime_sec', ...
+    'EDF_Duration_sec', 'Recorded_Duration_sec', 'Hookup_sec', 'Deadtime_sec', ...
     'n_spikes_deadtime', 'n_spikes_recording', 'n_spikes_total', ...
     'rate_deadtime_per_min', 'rate_recording_per_min', 'Flag'};
-varTypes = [{'string'}, repmat({'double'}, 1, 10), {'string'}];
+varTypes = [{'string'}, repmat({'double'}, 1, 11), {'string'}];
 
 Summary = table('Size', [0 numel(varNames)], ...
     'VariableTypes', varTypes, 'VariableNames', varNames);
@@ -126,28 +155,43 @@ for k = 1:nToDo
     detIdx = detect_spikes_wholefile(SN2, THRESH, WIN_SAMP);
     nTotal = numel(detIdx);
 
-    % --- Look up recorded duration ---
+    % --- Look up hookup time (seconds into file) ---
     flag = "";
+    if isKey(hookupMap, pairKey)
+        hookup_sec = hookupMap(pairKey);
+    else
+        hookup_sec = NaN;
+        flag = "no_hookup_match";
+    end
+
+    % Optional clinical duration, for reporting only.
     if isKey(durMap, pairKey)
         rec_dur = durMap(pairKey);
     else
         rec_dur = NaN;
-        flag = "no_clinical_match";
     end
 
-    dead_sec = edf_dur - rec_dur;
-
-    if isnan(dead_sec)
-        nDeadSamp = NaN;
-        nDead = NaN; nRec = NaN;
-    else
-        if dead_sec < -NEG_DEAD_TOL
-            flag = strtrim(flag + " negative_deadtime");
+    % --- Split detections at hookup_time ---
+    % NaN / missing hookup => no dead time; all detections are recording.
+    if isnan(hookup_sec)
+        if flag == ""
+            flag = "hookup_nan";
         end
-        dead_sec  = max(dead_sec, 0);
-        dead_sec  = min(dead_sec, edf_dur);
+        dead_sec  = 0;
+        nDeadSamp = 0;
+        nDead     = 0;
+        nRec      = nTotal;
+    else
+        dead_sec = hookup_sec;
+        if dead_sec < 0
+            flag = strtrim(flag + " negative_hookup");
+            dead_sec = 0;
+        end
+        if dead_sec > edf_dur
+            flag = strtrim(flag + " hookup_after_edf_end");
+            dead_sec = edf_dur;
+        end
         nDeadSamp = round(dead_sec * FS);
-
         nDead = sum(detIdx <= nDeadSamp);
         nRec  = nTotal - nDead;
         assert(nDead + nRec == nTotal, ...
@@ -159,7 +203,7 @@ for k = 1:nToDo
     rate_rec  = 60 * nRec  / max(rec_sec_eff, eps);
 
     Summary = [Summary; {string(fname), patientNum, sessionNum, ...
-        edf_dur, rec_dur, dead_sec, nDead, nRec, nTotal, ...
+        edf_dur, rec_dur, hookup_sec, dead_sec, nDead, nRec, nTotal, ...
         rate_dead, rate_rec, flag}]; %#ok<AGROW>
 
     if mod(k, PRINT_EVERY) == 0 || k == nToDo
@@ -173,17 +217,20 @@ end
 
 %% ===== Sanity checks =====
 assert(height(Summary) > 0, 'No files were successfully processed.');
-matched = ~ismissing(Summary.Recorded_Duration_sec) & isfinite(Summary.Recorded_Duration_sec);
-assert(all(Summary.n_spikes_deadtime(matched) + Summary.n_spikes_recording(matched) ...
-    == Summary.n_spikes_total(matched)), 'Spike counts do not sum to total.');
-fprintf('Matched clinical durations for %d / %d files.\n', sum(matched), height(Summary));
-fprintf('Median dead time: %.1f min (IQR %.1f-%.1f)\n', ...
-    median(Summary.Deadtime_sec(matched))/60, ...
-    prctile(Summary.Deadtime_sec(matched), 25)/60, ...
-    prctile(Summary.Deadtime_sec(matched), 75)/60);
-fprintf('Median spike rate: dead %.2f/min vs recording %.2f/min\n', ...
-    median(Summary.rate_deadtime_per_min(matched)), ...
-    median(Summary.rate_recording_per_min(matched)));
+assert(all(Summary.n_spikes_deadtime + Summary.n_spikes_recording ...
+    == Summary.n_spikes_total), 'Spike counts do not sum to total.');
+
+hasHookup = isfinite(Summary.Hookup_sec);
+fprintf('Sessions with a hookup time: %d / %d\n', sum(hasHookup), height(Summary));
+if any(hasHookup)
+    fprintf('Median dead time (hookup): %.1f min (IQR %.1f-%.1f)\n', ...
+        median(Summary.Deadtime_sec(hasHookup))/60, ...
+        prctile(Summary.Deadtime_sec(hasHookup), 25)/60, ...
+        prctile(Summary.Deadtime_sec(hasHookup), 75)/60);
+    fprintf('Median spike rate: dead %.2f/min vs recording %.2f/min\n', ...
+        median(Summary.rate_deadtime_per_min(hasHookup)), ...
+        median(Summary.rate_recording_per_min(hasHookup)));
+end
 
 %% ===== Save =====
 Summary = sortrows(Summary, {'Patient', 'Session', 'EEG_Name'});
