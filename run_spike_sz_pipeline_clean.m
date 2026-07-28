@@ -92,12 +92,43 @@ CFG.countCol          = "count_0_46";   % spike-count column to analyse
 CFG.durCol            = "Duration_sec";
 CFG.MAX_ROUTINE_HOURS = 4;
 
-% Bootstrap. Several figures (Fig S5, all CIs) are meaningless at nBoot = 0,
-% so a floor is enforced rather than silently producing NaN intervals.
-CFG.nBoot = 5000;
+% ---- Draft mode ------------------------------------------------------
+% CFG.QUICK = true is for checking that the pipeline RUNS, not for results.
+% It skips the GLME cluster bootstrap entirely, which is by far the slowest
+% step (thousands of refits of a mixed model on the full pair table). M1/M2
+% confidence intervals then fall back to the Laplace approximation, which the
+% forest plot, Table S1 and the results HTML all already handle. Everything
+% else resamples 200 times instead of 5000, so medians and Spearman CIs are
+% rough but present.
+%
+% If the four remaining GLME fits are still too slow, also set
+% CFG.SUBSAMPLE_PATIENTS (e.g. 400). That makes the run fast but every count
+% in the output is wrong by construction, so it is strictly a smoke test.
+CFG.QUICK              = false;   % <-- flip to true for a fast structural check
+CFG.SUBSAMPLE_PATIENTS = 0;       % 0 = all patients; e.g. 400 for a smoke test
+
 CFG.alpha = 0.05;
-assert(CFG.nBoot >= 1000, ...
-    'nBoot = %d is too low; CIs and bootstrap p-values require >= 1000.', CFG.nBoot);
+if CFG.QUICK
+    CFG.nBoot      = 200;         % medians, Spearman, delta-rho
+    CFG.nBootModel = 0;           % GLME cluster bootstrap; 0 = skip entirely
+else
+    CFG.nBoot      = 5000;
+    CFG.nBootModel = 5000;
+    % A floor, rather than silently producing NaN intervals on a real run.
+    assert(CFG.nBoot >= 1000, ...
+        'nBoot = %d is too low; CIs and bootstrap p-values require >= 1000.', CFG.nBoot);
+end
+
+% Generalized-syndrome panels need enough patients per syndrome; relax the
+% threshold when the cohort has been artificially shrunk.
+CFG.genSubMinN = 10;
+if CFG.SUBSAMPLE_PATIENTS > 0, CFG.genSubMinN = 3; end
+
+if CFG.QUICK || CFG.SUBSAMPLE_PATIENTS > 0
+    fprintf(2, ['\n*** DRAFT RUN: nBoot=%d, model bootstrap=%d, subsample=%d. ' ...
+        'Numbers are NOT publishable. ***\n\n'], ...
+        CFG.nBoot, CFG.nBootModel, CFG.SUBSAMPLE_PATIENTS);
+end
 
 % ---- Epsilons (two different ones on purpose) ------------------------
 % EPS_RATE only nudges exact zeros onto the log axes for DISPLAY.
@@ -143,6 +174,12 @@ require_cols(Report, ...
      "epilepsy_type","epilepsy_specific","nlp_gender","deid_birth_date", ...
      "start_time_deid","report_SPORADIC_EPILEPTIFORM_DISCHARGES", ...
      "jay_focal_epi","jay_multifocal_epi","jay_gen_epi","duration_hms"], "Report");
+
+% Draft-mode subsampling happens here, before any filtering, so the flow
+% diagram counts stay internally consistent with each other.
+if CFG.SUBSAMPLE_PATIENTS > 0
+    [Spikes, Report] = subsample_patients(Spikes, Report, CFG.SUBSAMPLE_PATIENTS);
+end
 
 % Duration first, then spike rate, so the toggle propagates everywhere.
 Spikes = apply_duration_source(Spikes, Report, CFG, P.deadtime);
@@ -205,7 +242,7 @@ save_fig(FigFlow, f('FigS1_flow.png'));
     f('FigS3_report_bias.png'));
 
 [GenSub, FigGenSub] = make_fig_generalized_subtypes(Views, CFG, ...
-    f('FigS4_generalized_subtypes.png'), 10, false);
+    f('FigS4_generalized_subtypes.png'), CFG.genSubMinN, false);
 
 % ---- Fig 2: detector controls ----
 [FigControls, ControlStats] = make_fig_controls(Views, CFG);
@@ -376,6 +413,22 @@ switch lower(string(CFG.DURATION_SOURCE))
         error('DURATION_SOURCE must be "file", "natus" or "deadtime" (got "%s").', ...
             CFG.DURATION_SOURCE);
 end
+end
+
+
+function [S, R] = subsample_patients(S, R, nKeep)
+%SUBSAMPLE_PATIENTS  Draft mode only. Keep a random subset of patients so the
+% whole pipeline runs in a fraction of the time. Reproducible because rng is
+% seeded at the top. Every count in the output is wrong by construction.
+pids = unique(double(R.patient_id));
+if numel(pids) <= nKeep
+    fprintf('[Draft] %d patients available; no subsampling needed.\n', numel(pids));
+    return
+end
+keep = pids(randperm(numel(pids), nKeep));
+S = S(ismember(double(S.Patient),    keep), :);
+R = R(ismember(double(R.patient_id), keep), :);
+fprintf('[Draft] Subsampled to %d of %d patients.\n', nKeep, numel(pids));
 end
 
 
@@ -912,8 +965,8 @@ MMR = struct( ...
     'BootstrapTable2', BT2, 'BootstrapBetas2', betas2, ...
     'LRT', lrt, 'LRT_p', lrt.pValue(2), ...
     'BootstrapConvergence', struct( ...
-        'M1_nConverged', nConv1, 'M1_nTotal', CFG.nBoot, ...
-        'M2_nConverged', nConv2, 'M2_nTotal', CFG.nBoot));
+        'M1_nConverged', nConv1, 'M1_nTotal', CFG.nBootModel, ...
+        'M2_nConverged', nConv2, 'M2_nTotal', CFG.nBootModel));
 end
 
 
@@ -935,7 +988,17 @@ function [T_boot, boot_betas, nConverged] = run_bootstrap(T, mdl, formula, CFG, 
 % p-values use the Phipson & Smyth (2010) (count + 1)/(B + 1) convention, so
 % they can never be exactly zero.
 
-nBoot      = CFG.nBoot;
+nBoot      = CFG.nBootModel;
+T_boot     = [];
+boot_betas = [];
+nConverged = 0;
+if nBoot == 0 || isempty(mdl)
+    % Draft mode. Every consumer of BootstrapTable1/2 already falls back to
+    % the Laplace CIs when the table is empty.
+    fprintf('Skipping %s bootstrap (nBootModel = 0); CIs fall back to Laplace.\n', label);
+    return
+end
+
 patients   = unique(T.PatientID);
 nPat       = numel(patients);
 boot_betas = nan(nBoot, size(fixedEffects(mdl),1));
@@ -2319,6 +2382,14 @@ nPatPresent = nnz(splitapply(@(x) any(string(x)=="present"), RS.ReportStatus, gp
 EC = Views.ExclusionCounts;
 fprintf(fid, '<html><head><meta charset="UTF-8"><title>Results</title></head><body>\n');
 
+% A draft run must never be mistaken for a final one when read out of context.
+if CFG.QUICK || CFG.SUBSAMPLE_PATIENTS > 0
+    fprintf(fid, ['<p style="background:#fdd;padding:8px;border:2px solid #900">' ...
+        '<strong>DRAFT RUN &mdash; DO NOT USE THESE NUMBERS.</strong> ' ...
+        'nBoot=%d, model bootstrap=%d, patient subsample=%d.</p>\n'], ...
+        CFG.nBoot, CFG.nBootModel, CFG.SUBSAMPLE_PATIENTS);
+end
+
 %% ---------------- Cohort ----------------
 fprintf(fid, '<h2>Cohort summary</h2>\n');
 fprintf(fid, ['<p>Of %d patients with EEG data in the Penn Epilepsy Center database, ' ...
@@ -2491,9 +2562,13 @@ fprintf(fid, ['Our secondary analysis also found that spike-seizure correlations
 %% ---------------- Diagnostics ----------------
 BC = MMR.BootstrapConvergence;
 fprintf(fid, '<h2>Bootstrap diagnostics</h2>\n');
-fprintf(fid, '<p>M1: %d/%d iterations converged (%.1f%%). M2: %d/%d (%.1f%%).</p>\n', ...
-    BC.M1_nConverged, BC.M1_nTotal, 100*BC.M1_nConverged/BC.M1_nTotal, ...
-    BC.M2_nConverged, BC.M2_nTotal, 100*BC.M2_nConverged/BC.M2_nTotal);
+if BC.M1_nTotal == 0
+    fprintf(fid, '<p>Model bootstrap skipped; M1/M2 CIs are Laplace approximations.</p>\n');
+else
+    fprintf(fid, '<p>M1: %d/%d iterations converged (%.1f%%). M2: %d/%d (%.1f%%).</p>\n', ...
+        BC.M1_nConverged, BC.M1_nTotal, 100*BC.M1_nConverged/max(1,BC.M1_nTotal), ...
+        BC.M2_nConverged, BC.M2_nTotal, 100*BC.M2_nConverged/max(1,BC.M2_nTotal));
+end
 
 %% ---------------- Fig S9 legend ----------------
 fprintf(fid, '<h2>Figure S9 legend</h2>\n');
