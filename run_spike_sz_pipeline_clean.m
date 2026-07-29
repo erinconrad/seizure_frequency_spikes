@@ -86,7 +86,7 @@ P.outDir        = '../output';
 %              REVIEW: this clips the denominator but NOT the numerator, so
 %              spike rate is biased upward. Sensitivity use only.
 %   "deadtime" detections outside the leading dead window / that same window
-CFG.DURATION_SOURCE   = "file";
+CFG.DURATION_SOURCE   = "deadtime";
 CFG.DEADTIME_COUNTCOL = "count_0_46";   % threshold the deadtime file was built at
 CFG.countCol          = "count_0_46";   % spike-count column to analyse
 CFG.durCol            = "Duration_sec";
