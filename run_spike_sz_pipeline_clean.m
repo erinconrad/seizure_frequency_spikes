@@ -99,7 +99,7 @@ CFG.MAX_ROUTINE_HOURS = 4;
 % If the four remaining GLME fits are still too slow, also set
 % CFG.SUBSAMPLE_PATIENTS (e.g. 400). That makes the run fast but every count
 % in the output is wrong by construction, so it is strictly a smoke test.
-CFG.QUICK              = true;   % <-- flip to true for a fast structural check
+CFG.QUICK              = false;   % <-- flip to true for a fast structural check
 CFG.SUBSAMPLE_PATIENTS = 0;       % 0 = all patients; e.g. 400 for a smoke test
 
 CFG.alpha = 0.05;
