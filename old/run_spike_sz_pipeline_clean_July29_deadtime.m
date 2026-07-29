@@ -74,18 +74,31 @@ rng(1);
 % ---- Paths -----------------------------------------------------------
 P.spikeCounts   = '../data/spike_counts.csv';
 P.report        = '../data/clinical_data_deidentified.csv';
+P.deadtime      = '../data/spike_counts_deadtime_0p46.csv';
 P.outDir        = '../output';
 
 % ---- Analysis switches ----------------------------------------------
-% EEG duration is the EDF span recorded in spike_counts.csv. It is both the
-% spike-rate denominator and the quantity the <=4 h routine rule is tested
-% against, so the two cannot disagree. Earlier drafts carried a
-% DURATION_SOURCE toggle with "natus" (duration_hms) and "deadtime"
-% alternatives; neither is part of the analysis any more.
-CFG.countCol          = "count_0_46";    % spike-count column to analyse
-CFG.durCol            = "Duration_sec";  % EDF span, seconds
+% DURATION_SOURCE decides the denominator (and, for "deadtime", also the
+% numerator) of spike rate. Applied BEFORE any filtering so that the choice
+% propagates to spike rates, the <4 h routine filter, and everything after.
+%   "file"     EDF span from spike_counts.csv (primary analysis)
+%   "natus"    duration_hms from the report; clips pre-connection segments
+%              REVIEW: this clips the denominator but NOT the numerator, so
+%              spike rate is biased upward. Sensitivity use only.
+%   "deadtime" detections outside the leading dead window / that same window
+CFG.DURATION_SOURCE   = "deadtime";
+CFG.DEADTIME_COUNTCOL = "count_0_46";   % threshold the deadtime file was built at
+CFG.countCol          = "count_0_46";   % spike-count column to analyse
+CFG.durCol            = "Duration_sec";
 CFG.MAX_ROUTINE_HOURS = 4;
 
+% Which duration the <= MAX_ROUTINE_HOURS routine-EEG rule is tested against.
+% The rule describes the RECORDING, not the window spikes happened to be
+% counted over, so by default it always uses the EDF span and the cohort is the
+% same set of EEGs under every DURATION_SOURCE.
+%   "file"      test FileDuration_sec (EDF span from spike_counts.csv)
+%   "analysis"  test whatever DURATION_SOURCE produced (previous behaviour)
+CFG.ROUTINE_FILTER_DURATION = "file";
 
 % ---- Draft mode ------------------------------------------------------
 % CFG.QUICK = true is for checking that the pipeline RUNS, not for results.
@@ -99,7 +112,7 @@ CFG.MAX_ROUTINE_HOURS = 4;
 % If the four remaining GLME fits are still too slow, also set
 % CFG.SUBSAMPLE_PATIENTS (e.g. 400). That makes the run fast but every count
 % in the output is wrong by construction, so it is strictly a smoke test.
-CFG.QUICK              = true;   % <-- flip to true for a fast structural check
+CFG.QUICK              = false;   % <-- flip to true for a fast structural check
 CFG.SUBSAMPLE_PATIENTS = 0;       % 0 = all patients; e.g. 400 for a smoke test
 
 CFG.alpha = 0.05;
@@ -168,7 +181,7 @@ require_cols(Report, ...
      "visit_type","visit_dates_deid","sz_freqs","visit_hasSz", ...
      "epilepsy_type","epilepsy_specific","nlp_gender","deid_birth_date", ...
      "start_time_deid","report_SPORADIC_EPILEPTIFORM_DISCHARGES", ...
-     "jay_focal_epi","jay_multifocal_epi","jay_gen_epi"], "Report");
+     "jay_focal_epi","jay_multifocal_epi","jay_gen_epi","duration_hms"], "Report");
 
 % Draft-mode subsampling happens here, before any filtering, so the flow
 % diagram counts stay internally consistent with each other.
@@ -176,13 +189,9 @@ if CFG.SUBSAMPLE_PATIENTS > 0
     [Spikes, Report] = subsample_patients(Spikes, Report, CFG.SUBSAMPLE_PATIENTS);
 end
 
-% Spike rate over the full EDF span. Rows without a usable duration fail the
-% routine filter below rather than being dropped silently here.
-Spikes.(CFG.durCol) = double(Spikes.(CFG.durCol));
-assert(any(isfinite(Spikes.(CFG.durCol)) & Spikes.(CFG.durCol) > 0), ...
-    'No spike row has a usable EDF duration in %s.', CFG.durCol);
-Spikes.SpikeRate_perHour = ...
-    double(Spikes.(CFG.countCol)) ./ Spikes.(CFG.durCol) * 3600;
+% Duration first, then spike rate, so the toggle propagates everywhere.
+Spikes = apply_duration_source(Spikes, Report, CFG, P.deadtime);
+Spikes.SpikeRate_perHour = Spikes.(CFG.countCol) ./ Spikes.(CFG.durCol) * 3600;
 
 %% ===================== 2. FILTER =====================
 % (a) inside each patient's visit arrays, keep only outpatient clinic visits
@@ -235,7 +244,7 @@ DurCompare = add_duration_to_model(MMR, Views, CFG.alpha);
 FigFlow = make_flowchart_figure(Views, MMR);
 save_fig(FigFlow, f('FigS1_flow.png'));
 
-[FigDur, DurStats] = make_eeg_duration_histogram(Views, CFG, f('FigS2_eeg_duration.png'));
+[FigDur, DurStats] = make_eeg_duration_histogram(Views, f('FigS2_eeg_duration.png'));
 
 [FigBias, BiasStats] = make_fig_report_bias(Views, SzFreq, CFG, ...
     f('FigS3_report_bias.png'));
@@ -312,6 +321,108 @@ assert(numel(unique(key)) == numel(key), ...
 end
 
 
+function S = apply_duration_source(S, R, CFG, deadtimeCsv)
+%APPLY_DURATION_SOURCE  Overwrite the duration (and, for "deadtime", also the
+% spike count) used to compute spike rate.
+%
+% Numerator and denominator must always describe the same window. "file" and
+% "deadtime" satisfy this; "natus" deliberately does not (see the note in the
+% config block) and is for sensitivity analysis only.
+
+durCol   = CFG.durCol;
+countCol = CFG.countCol;
+
+switch lower(string(CFG.DURATION_SOURCE))
+
+    case "file"
+        % Nothing to do: Duration_sec already holds the EDF span.
+        fprintf('[Duration] File duration (%s from spike counts).\n', durCol);
+
+    case "natus"
+        require_cols(R, ["patient_id","session_number","duration_hms"], "Report");
+
+        dur_raw = R.duration_hms;
+        if isduration(dur_raw)
+            natus_sec = seconds(dur_raw);
+        else
+            natus_sec = seconds(duration(strtrim(string(dur_raw)), ...
+                'InputFormat','hh:mm:ss'));
+        end
+
+        Map = unique(table(double(R.patient_id), double(R.session_number), ...
+            natus_sec, 'VariableNames',{'Patient','Session','Dur_sec'}), 'rows');
+        assert_unique_keys(Map, "Patient","Session", "Natus duration map");
+
+        [tf, loc] = ismember([double(S.Patient), double(S.Session)], ...
+                             [Map.Patient, Map.Session], 'rows');
+        newDur       = nan(height(S),1);
+        newDur(tf)   = Map.Dur_sec(loc(tf));
+        S.(durCol)   = newDur;
+
+        fprintf(['[Duration] Natus duration (duration_hms). %d/%d spike rows ' ...
+            'have no match and are set missing (dropped at the routine filter).\n'], ...
+            nnz(~tf), height(S));
+
+    case "deadtime"
+        assert(strlength(string(deadtimeCsv)) > 0 && isfile(deadtimeCsv), ...
+            'Dead-time CSV not found: %s', deadtimeCsv);
+        assert(strlength(string(CFG.DEADTIME_COUNTCOL)) == 0 || ...
+               string(countCol) == string(CFG.DEADTIME_COUNTCOL), ...
+            ['countCol is "%s" but the dead-time file was built for "%s". ' ...
+             'The split is threshold-specific.'], countCol, CFG.DEADTIME_COUNTCOL);
+
+        D = readtable(deadtimeCsv,'TextType','string','VariableNamingRule','preserve');
+        require_cols(D, ["Patient","Session","EDF_Duration_sec","Deadtime_sec", ...
+            "n_spikes_deadtime","n_spikes_recording","n_spikes_total"], "Deadtime");
+
+        nDead   = double(D.n_spikes_deadtime);
+        nRec    = double(D.n_spikes_recording);
+        nTot    = double(D.n_spikes_total);
+        edfSec  = double(D.EDF_Duration_sec);
+        deadSec = double(D.Deadtime_sec);
+        ok      = isfinite(nDead) & isfinite(nRec);
+
+        assert(all(nDead(ok) + nRec(ok) == nTot(ok)), ...
+            'Dead-time file: spike split is not exhaustive in %d rows.', ...
+            nnz(ok & (nDead + nRec ~= nTot)));
+        assert(all(deadSec(ok) >= 0 & deadSec(ok) <= edfSec(ok)), ...
+            'Dead-time file: Deadtime_sec outside [0, EDF_Duration_sec].');
+
+        % Denominator is EDF - dead time, i.e. exactly the window the
+        % recording count was taken over (not Recorded_Duration_sec, which
+        % differs on rows where dead time was clamped to zero).
+        recSec = edfSec - deadSec;
+        usable = ok & isfinite(recSec) & recSec > 0;
+
+        Map = unique(table(double(D.Patient(usable)), double(D.Session(usable)), ...
+            nRec(usable), recSec(usable), ...
+            'VariableNames',{'Patient','Session','Count','Dur_sec'}), 'rows');
+        assert_unique_keys(Map, "Patient","Session", "dead-time map");
+
+        [tf, loc] = ismember([double(S.Patient), double(S.Session)], ...
+                             [Map.Patient, Map.Session], 'rows');
+        newCount     = nan(height(S),1);
+        newDur       = nan(height(S),1);
+        newCount(tf) = Map.Count(loc(tf));
+        newDur(tf)   = Map.Dur_sec(loc(tf));
+
+        % Never let one of the two be set without the other.
+        assert(isequal(isfinite(newCount), isfinite(newDur)), ...
+            'Dead-time join produced a count without a duration (or vice versa).');
+        assert(any(tf), 'No spike rows matched the dead-time file.');
+
+        S.(countCol) = newCount;
+        S.(durCol)   = newDur;
+
+        fprintf(['[Duration] Dead-time corrected. %d/%d spike rows matched; ' ...
+            '%d set missing.\n'], nnz(tf), height(S), nnz(~tf));
+
+    otherwise
+        error('DURATION_SOURCE must be "file", "natus" or "deadtime" (got "%s").', ...
+            CFG.DURATION_SOURCE);
+end
+end
+
 
 function [S, R] = subsample_patients(S, R, nKeep)
 %SUBSAMPLE_PATIENTS  Draft mode only. Keep a random subset of patients so the
@@ -383,13 +494,10 @@ function [S, R, nPatientsTotal] = filter_outpatient_routine(S, R, CFG)
 %FILTER_OUTPATIENT_ROUTINE  Keep outpatient routine EEGs of <= MAX_ROUTINE_HOURS.
 %
 % "Outpatient" is taken from any of three partially redundant sources
-% (acquisition site, report patient class, manual in/out label). "Routine" is
-% the EDF span in CFG.durCol, the same duration spike rates are computed from.
+% (acquisition site, report patient class, manual in/out label).
 
 nR0 = height(R); nS0 = height(S);
 nPatientsTotal = numel(unique(double(R.patient_id)));   % denominator of the flow diagram
-
-require_cols(S, CFG.durCol, "Spikes");
 
 acq   = lower(strtrim(string(R.acquired_on)));
 class = lower(strtrim(string(R.report_PATIENT_CLASS)));
@@ -401,12 +509,9 @@ OutptKeys = unique(R(isOutpt, {'patient_id','session_number'}));
 OutptKeys.Properties.VariableNames = {'Patient','Session'};
 assert(~isempty(OutptKeys), 'No outpatient sessions identified.');
 
-% Non-finite and zero durations fail this test, so they never reach a spike
-% rate of NaN or Inf downstream.
-dur       = double(S.(CFG.durCol));
-isRoutine = isfinite(dur) & dur > 0 & dur <= CFG.MAX_ROUTINE_HOURS*3600;
-assert(any(isRoutine), 'No spike rows survive the <=%g h routine filter.', ...
-    CFG.MAX_ROUTINE_HOURS);
+% Non-finite durations fail this test, which is how missing Natus/deadtime
+% durations drop out of the analysis.
+isRoutine   = isfinite(S.(CFG.durCol)) & S.(CFG.durCol) <= CFG.MAX_ROUTINE_HOURS*3600;
 RoutineKeys = unique(S(isRoutine, {'Patient','Session'}));
 
 Keys = innerjoin(OutptKeys, RoutineKeys, 'Keys', {'Patient','Session'});
@@ -414,8 +519,6 @@ S = innerjoin(S, Keys, 'Keys', {'Patient','Session'});
 R = innerjoin(R, Keys, 'LeftKeys', {'patient_id','session_number'}, ...
                        'RightKeys', {'Patient','Session'});
 
-fprintf('[Routine filter] %d/%d spike rows longer than %g h or without a duration\n', ...
-    nnz(~isRoutine), nS0, CFG.MAX_ROUTINE_HOURS);
 fprintf('[Outpatient+routine] Kept %d/%d spike rows, %d/%d report rows\n', ...
     height(S), nS0, height(R), nR0);
 end
@@ -1766,54 +1869,73 @@ end
 end
 
 
-function [figH, DurStats] = make_eeg_duration_histogram(Views, CFG, outPath)
-%MAKE_EEG_DURATION_HISTOGRAM  Fig S2. EDF duration of the cohort's EEGs.
+function [figH, DurStats] = make_eeg_duration_histogram(Views, outPath)
+%MAKE_EEG_DURATION_HISTOGRAM  Fig S2. File vs Natus duration for cohort EEGs.
 %
-% One series: the file (EDF) duration from spike_counts.csv, which is both the
-% spike-rate denominator and the quantity the <=4 h routine rule was applied
-% to. The earlier two-series version also plotted the Natus duration_hms; that
-% existed to motivate the dead-time correction and is no longer needed.
+% The file duration is the full EDF span; the Natus duration clips segments
+% recorded before the electrodes were connected. The difference between them
+% is the "clipped" time that motivates the deadtime correction.
 %
-% DurStats feeds the cohort paragraph of the results HTML, so the figure and
-% the text can never disagree.
+% DurStats feeds the EEG-duration row of Table 1 and the cohort paragraph of
+% the results HTML, so those two can never disagree with this figure.
 
 FONT = 20;
-COL_FILE = [0.22 0.45 0.70];
+COL_FILE  = [0.22 0.45 0.70];
+COL_NATUS = [0.85 0.33 0.10];
 
 Sess = Views.SessionsForFigures;
-require_cols(Sess, ["Patient","Session",CFG.durCol], "SessionsForFigures");
+require_cols(Sess, ["Patient","Session","Duration_sec"], "SessionsForFigures");
 assert_unique_keys(Sess, "Patient","Session", "SessionsForFigures");
 
-fileMin = double(Sess.(CFG.durCol)) / 60;
-% Guaranteed by the routine filter; asserted here so a change there is caught.
-assert(all(isfinite(fileMin) & fileMin > 0), ...
-    '%d cohort EEGs have a non-positive or non-finite duration.', ...
-    nnz(~(isfinite(fileMin) & fileMin > 0)));
+Rep = Views.ReportForKeptSessions;
+require_cols(Rep, ["Patient","Session","duration_hms"], "ReportForKeptSessions");
+assert_unique_keys(Rep, "Patient","Session", "ReportForKeptSessions");
 
-edges = 0 : 5 : ceil(max(fileMin)/5)*5;
+D = innerjoin( ...
+    table(double(Sess.Patient), double(Sess.Session), double(Sess.Duration_sec)/60, ...
+        'VariableNames',{'Patient','Session','FileMin'}), ...
+    table(double(Rep.Patient), double(Rep.Session), minutes(Rep.duration_hms), ...
+        'VariableNames',{'Patient','Session','NatusMin'}), ...
+    'Keys',{'Patient','Session'});
+assert(height(D) == height(Sess), ...
+    'Join dropped EEGs: %d session rows vs %d matched.', height(Sess), height(D));
+
+fileMin  = D.FileMin(isfinite(D.FileMin));
+natusMin = D.NatusMin(isfinite(D.NatusMin));
+assert(~isempty(fileMin) && ~isempty(natusMin), 'No finite durations found.');
+
+edges = 0 : 5 : ceil(max([fileMin; natusMin])/5)*5;
 
 figH = figure('Color','w','Position',[100 100 850 540]);
 ax = axes(figH); hold(ax,'on'); box(ax,'off'); grid(ax,'on');
-histogram(ax, fileMin, 'BinEdges',edges, 'FaceColor',COL_FILE, ...
-    'FaceAlpha',0.6, 'EdgeColor','none');
-xline(ax, median(fileMin), '--', 'Color',[0.15 0.15 0.15], 'LineWidth',2, ...
-    'Label',sprintf('median %.0f min', median(fileMin)), ...
-    'LabelOrientation','horizontal', 'LabelVerticalAlignment','top', ...
-    'FontSize',FONT-6);
+histogram(ax, fileMin,  'BinEdges',edges, 'FaceColor',COL_FILE, 'FaceAlpha',0.5, ...
+    'EdgeColor','none', 'DisplayName',sprintf('File duration (N=%d)', numel(fileMin)));
+histogram(ax, natusMin, 'BinEdges',edges, 'FaceColor',COL_NATUS,'FaceAlpha',0.5, ...
+    'EdgeColor','none', 'DisplayName',sprintf('Natus duration (N=%d)', numel(natusMin)));
+xline(ax, median(fileMin),  '--', 'Color',COL_FILE,  'LineWidth',2, 'HandleVisibility','off');
+xline(ax, median(natusMin), '--', 'Color',COL_NATUS, 'LineWidth',2, 'HandleVisibility','off');
 
 xlabel(ax, 'EEG duration (minutes)', 'FontSize',FONT);
 ylabel(ax, 'Number of EEGs', 'FontSize',FONT);
-title(ax, sprintf('EEG durations in study cohort (N = %d EEGs)', numel(fileMin)), ...
+title(ax, sprintf('EEG durations in study cohort (N = %d EEGs)', height(D)), ...
     'FontSize',FONT, 'FontWeight','bold');
+legend(ax, 'Location','northeast', 'FontSize',FONT-6);
 set(ax,'FontSize',FONT);
 
-fprintf('[Durations] Median %.1f (IQR %.1f-%.1f) min over %d EEGs\n', ...
-    median(fileMin), prctile(fileMin,25), prctile(fileMin,75), numel(fileMin));
+paired = isfinite(D.FileMin) & isfinite(D.NatusMin);
+clip   = D.FileMin(paired) - D.NatusMin(paired);
+fprintf(['[Durations] File median %.1f (IQR %.1f-%.1f) min; ' ...
+    'Natus median %.1f (IQR %.1f-%.1f) min; ' ...
+    'clipped median %.1f (IQR %.1f-%.1f) min over %d EEGs\n'], ...
+    median(fileMin),  prctile(fileMin,25),  prctile(fileMin,75), ...
+    median(natusMin), prctile(natusMin,25), prctile(natusMin,75), ...
+    median(clip), prctile(clip,25), prctile(clip,75), nnz(paired));
 
 DurStats = struct( ...
-    'nEEG',     numel(fileMin), ...
-    'file_med', median(fileMin), ...
-    'file_q',   prctile(fileMin, [25 75]));
+    'nEEG',        height(D), ...
+    'file_med',    median(fileMin),  'file_q', prctile(fileMin,  [25 75]), ...
+    'natus_med',   median(natusMin), 'natus_q',prctile(natusMin, [25 75]), ...
+    'clip_med',    median(clip),     'clip_q', prctile(clip,     [25 75]));
 
 save_fig(figH, outPath);
 end
@@ -2126,7 +2248,9 @@ eegVec = per_patient(Views.SessionsForFigures.Patient, ...
     Views.SessionsForFigures.Session, @(x) numel(unique(x)), allPatients);
 
 % EEG duration is summarised across EEGs, not across patients, so it is taken
-% straight from the session table rather than through per_patient. 
+% straight from the session table rather than through per_patient. This uses
+% whichever duration DURATION_SOURCE selected, i.e. the one spike rates were
+% actually computed from.
 durMin = double(Views.SessionsForFigures.(CFG.durCol)) / 60;
 durMin = durMin(isfinite(durMin));
 
