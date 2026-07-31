@@ -62,7 +62,7 @@ end
 % EPS_SPIKE enters log(spike rate) in the MODEL
 CFG.EPS_RATE  = 30e-3;    % spikes/hour, display floor
 CFG.EPS_FREQ  = 1e-3;     % seizures/month, display floor
-CFG.EPS_SPIKE = 1e-3;     % spikes/hour, model floor
+CFG.EPS_SPIKE = 1e-1;     % spikes/hour, model floor - usually 1e-3, tried 1e-1 to see how much it changes (because eegs without spikes probably detect ~1/hour!)
 
 % ---- Cohort definitions ---------------------------------------------
 CFG.NESD_LABEL = "Non-Epileptic Seizure Disorder";
@@ -727,15 +727,12 @@ PairTable = vertcat(blocks{~cellfun(@isempty, blocks)});
 
 nBefore = height(PairTable);
 
-%{
+% restrict to visits-EEG pairs with finite spike rate, sz freq, signed lag,
+% epilepsy type
 PairTable = PairTable( ...
     isfinite(PairTable.SpikesPerHour) & isfinite(PairTable.SzFreq) & ...
     isfinite(PairTable.SignedLag_days) & strlength(PairTable.EpiType3) > 0, :);
-%}
-% Don't require finite sz freq
-PairTable = PairTable( ...
-    isfinite(PairTable.SpikesPerHour) & ...
-    isfinite(PairTable.SignedLag_days) & strlength(PairTable.EpiType3) > 0, :);
+
 
 fprintf('[Pairs] %d patients, %d pairs (%d dropped for missing data)\n', ...
     numel(patients), height(PairTable), nBefore - height(PairTable));
