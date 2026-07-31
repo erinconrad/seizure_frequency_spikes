@@ -20,9 +20,6 @@ function Out = run_spike_sz_pipeline_clean()
 %     "no epilepsy diagnosis" bucket. Final cohort is unchanged.
 %   - Non-finite values are no longer silently plotted at the zero floor.
 
-% ERIN CHANGE JULY 30:
-% - no longer exclude visits without sz frequency from model (should be
-% unnecessary)
 
 %% ===================== 0. CONFIGURATION =====================
 rng(1);
@@ -730,15 +727,12 @@ PairTable = vertcat(blocks{~cellfun(@isempty, blocks)});
 
 nBefore = height(PairTable);
 
-% CHECK THIS - ERIN CHANGED THIS AS I HAD PREVIOUSLY REMOVED VISITS WITH NO
-% SZ FREQUENCY BUT I DONT NEED TO DO THIS
-
 %{
 PairTable = PairTable( ...
     isfinite(PairTable.SpikesPerHour) & isfinite(PairTable.SzFreq) & ...
     isfinite(PairTable.SignedLag_days) & strlength(PairTable.EpiType3) > 0, :);
 %}
-
+% Don't require finite sz freq
 PairTable = PairTable( ...
     isfinite(PairTable.SpikesPerHour) & ...
     isfinite(PairTable.SignedLag_days) & strlength(PairTable.EpiType3) > 0, :);
@@ -785,6 +779,7 @@ T.EpiType3_cat  = reordercats(categorical(string(T.EpiType3), canonical3), ...
                               ["Temporal","Frontal","General"]);
 
 fprintf('[Model] %d pairs, %d patients\n', height(T), numel(unique(T.Patient)));
+% 1722 patients
 
 formula_M1 = ['HasSz_bin ~ LogSpikesPerHour * AbsLag_years + ' ...
               'LogSpikesPerHour * VisitAfterEEG + EpiType3_cat + (1|PatientID)'];
@@ -846,12 +841,8 @@ end
 function [T_boot, boot_betas, nConverged] = run_bootstrap(T, mdl, formula, CFG, label)
 %RUN_BOOTSTRAP  Cluster bootstrap, resampling PATIENTS (not rows).
 %
-% Resampling whole patients preserves the within-patient correlation that the
-% random intercept models. Each drawn patient is given a fresh ID so that a
+% Each drawn patient is given a fresh ID so that a
 % patient drawn twice contributes two independent clusters.
-%
-% p-values use the Phipson & Smyth (2010) (count + 1)/(B + 1) convention, so
-% they can never be exactly zero.
 
 nBoot      = CFG.nBootModel;
 T_boot     = [];
@@ -870,9 +861,9 @@ boot_betas = nan(nBoot, size(fixedEffects(mdl),1));
 
 fprintf('\nBootstrapping %s (%d iterations)...\n', label, nBoot);
 parfor b = 1:nBoot
-    bootPats = patients(randi(nPat, nPat, 1));
+    bootPats = patients(randi(nPat, nPat, 1)); % pick nPat patients with replacement
     blocks   = cell(nPat, 1);
-    for k = 1:nPat
+    for k = 1:nPat % assign each patient drawn its own ID 
         blk = T(T.PatientID == bootPats(k), :);
         blk.PatientID = categorical(repmat(k, height(blk), 1));
         blocks{k} = blk;
@@ -955,7 +946,7 @@ assert(height(T) == nBefore, ...
     nBefore, height(T));
 
 T.EEG_DurationHours = T.Duration_sec / 3600;
-assert(all(isfinite(T.EEG_DurationHours)), 'Non-finite EEG durations in the model table.');
+assert(all(isfinite(T.EEG_DurationHours)), 'Non-finite EEG durations in the model table.'); % every EEG has a duration
 
 base = ['HasSz_bin ~ LogSpikesPerHour * AbsLag_years + ' ...
         'LogSpikesPerHour * VisitAfterEEG + EpiType3_cat'];
@@ -981,6 +972,7 @@ DurCompare = struct('ModelTable',T, 'mdl_reduced',mdl_reduced, 'mdl_full',mdl_fu
     'Duration_OR_hi',row.OR_hi, 'Duration_p',row.p);
 end
 
+% ERIN READ THROUGH HERE
 
 %% #####################################################################
 %% ##  FIGURES
@@ -1610,8 +1602,8 @@ fprintf(['[Near/Far] Long-gap visits are %.0f days later on median (%s); ' ...
     median(Tdesc.NearFreq,'omitnan'), median(Tdesc.FarFreq,'omitnan'), p_label(p_sz));
 
 %% --- Paired correlations ---
-Sn = renamevars(build_patient_seizure_metrics(Vn), "MeanSzFreq", "SzNear");
-Sf = renamevars(build_patient_seizure_metrics(Vf), "MeanSzFreq", "SzFar");
+Sn = renamevars(build_patient_seizure_metrics(Vn), "MeanSzFreq", "SzNear"); % get mean sz frequency over short gap visits
+Sf = renamevars(build_patient_seizure_metrics(Vf), "MeanSzFreq", "SzFar"); % mean sz frequency over long gap
 J  = innerjoin(innerjoin(SpikeTbl, Sn, 'Keys','Patient'), Sf, 'Keys','Patient');
 J  = J(isfinite(J.MeanSpikeRate_perHour) & isfinite(J.SzNear) & isfinite(J.SzFar), :);
 
@@ -1728,14 +1720,7 @@ end
 
 function [figH, DurStats] = make_eeg_duration_histogram(Views, CFG, outPath)
 %MAKE_EEG_DURATION_HISTOGRAM  Fig S2. EDF duration of the cohort's EEGs.
-%
-% One series: the file (EDF) duration from spike_counts.csv, which is both the
-% spike-rate denominator and the quantity the <=4 h routine rule was applied
-% to. The earlier two-series version also plotted the Natus duration_hms; that
-% existed to motivate the dead-time correction and is no longer needed.
-%
-% DurStats feeds the cohort paragraph of the results HTML, so the figure and
-% the text can never disagree.
+
 
 FONT = 20;
 COL_FILE = [0.22 0.45 0.70];
@@ -2027,6 +2012,7 @@ end
 save_fig(fig, fig_out);
 end
 
+% ERIN READ THROUGH HERE
 
 %% #####################################################################
 %% ##  TABLES AND HTML
