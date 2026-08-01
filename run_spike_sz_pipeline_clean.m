@@ -9,7 +9,7 @@ function Out = run_spike_sz_pipeline_clean()
 %   1. spike_counts.csv and clinical_data_deidentified.csv in ../data
 %      https://upenn.box.com/s/et0ws47f3aq543zl781aryafr3qhu2ev
 %   2. MATLAB R2024a + Statistics and Machine Learning Toolbox
-%   3. Codebase: https://github.com/erinconrad/seizure_severity
+%   3. Codebase: https://github.com/erinconrad/seizure_frequency_spikes
 %
 % USAGE
 %   >> Out = run_spike_sz_pipeline_clean;
@@ -57,7 +57,7 @@ end
 % EPS_SPIKE enters log(spike rate) in the MODEL
 CFG.EPS_RATE  = 30e-3;    % spikes/hour, display floor
 CFG.EPS_FREQ  = 1e-3;     % seizures/month, display floor
-CFG.EPS_SPIKE = 1e-3;     % spikes/hour, model floor (when Erin tried 1e-1 results similar although odds ratio for interaction effect spikes x abs lag a bit stronger
+CFG.EPS_SPIKE = 1e-3;     % spikes/hour, model floor 
 
 % ---- Cohort definitions ---------------------------------------------
 CFG.NESD_LABEL = "Non-Epileptic Seizure Disorder";
@@ -964,7 +964,6 @@ DurCompare = struct('ModelTable',T, 'mdl_reduced',mdl_reduced, 'mdl_full',mdl_fu
     'Duration_OR_hi',row.OR_hi, 'Duration_p',row.p);
 end
 
-% ERIN READ THROUGH HERE
 
 %% #####################################################################
 %% ##  FIGURES
@@ -1333,7 +1332,7 @@ xlabel(axC, sprintf('Odds Ratio (%s)', ci_label), 'FontSize',FONT);
 xpad = 0.05 * (max(OR_hi) - min(OR_lo));
 xlim(axC, [min(OR_lo)-xpad, max(OR_hi)+xpad]);
 th = title(axC, {'A. Spike rate, epilepsy type, and EEG-visit gap', ...
-    'predict seizure occurrence'}, 'FontSize',FONT, 'FontWeight','bold');
+    'are associated with seizure occurrence'}, 'FontSize',FONT, 'FontWeight','bold');
 th.Units = 'normalized';
 th.Position(1:2) = th.Position(1:2) + [-0.13 0.02];
 
@@ -1373,7 +1372,7 @@ ylabel(axD, 'P(seizure reported at visit)', 'FontSize',FONT);
 xlim(axD,[0 30]); ylim(axD,[0.3 0.61]);
 lg = legend(axD, 'Location','southeast', 'FontSize',FONT-6);
 title(lg, 'EEG-visit lag');
-th = title(axD, {'B. Spike rates are most predictive', ...
+th = title(axD, {'B. Spike-seizure association is strongest', ...
     'when EEG is obtained close to the visit'}, 'FontSize',FONT, 'FontWeight','bold');
 th.Units = 'normalized'; th.Position(2) = th.Position(2) + 0.02;
 set(axD, 'FontSize',FONT);
