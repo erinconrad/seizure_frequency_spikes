@@ -4,7 +4,7 @@ association in a large epilepsy cohort" by Conrad et al.
 
 Requirements:
 1. spike_counts.csv and clinical_data_deidentified.csv
-     - both are available for download at: https://upenn.box.com/s/yy4o1t6nit7yu35flz59ux6zf54slg9m
+     - both are available for download at: https://upenn.box.com/s/et0ws47f3aq543zl781aryafr3qhu2ev
      - spike_counts.csv contains a list of spike counts at varying SpikeNet
      probability threshold for each EEG
      - clinical_data_deidentified.csv contains clinical information for
