@@ -34,7 +34,7 @@ CFG.MAX_ROUTINE_HOURS = 4;
 
 
 % ---- Draft mode ------------------------------------------------------
-CFG.QUICK              = true;   % <-- flip to true for a fast structural check
+CFG.QUICK              = false;   % <-- flip to true for a fast structural check
 
 CFG.alpha = 0.05;
 if CFG.QUICK
