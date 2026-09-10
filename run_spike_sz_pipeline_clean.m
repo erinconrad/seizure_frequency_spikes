@@ -2710,10 +2710,10 @@ if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
 exportgraphics(figH, outPath, 'Resolution',300);   % PNG as before
 fprintf('Saved: %s\n', outPath);
 
-epsPath = fullfile(d, [stem '.eps']);
-exportgraphics(figH, epsPath, 'ContentType','vector', ...
+pdfPath = fullfile(d, [stem '.pdf']);
+exportgraphics(figH, pdfPath, 'ContentType','vector', ...
     'Resolution',600, 'BackgroundColor','white');
-fprintf('Saved: %s\n', epsPath);
+fprintf('Saved: %s\n', pdfPath);
 
 end
 
