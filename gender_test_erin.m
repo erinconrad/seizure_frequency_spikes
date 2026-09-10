@@ -110,6 +110,11 @@ SzFreq = build_patient_seizure_metrics(Vuniq);                     % 1 row / pat
 
 Views  = build_filtered_view(Spikes, Report, Typing, SzFreq, CFG, nPatientsTotal);
 
+
+%% ==================== ERIN GENDER TESTS ===================
+G = build_gender_cohort_matched(Views);
+mdl_gender = fitglm(G, 'high_spikes ~ Sex + class + AgeGroup', 'Distribution','binomial')
+
 %% ===================== 4. MODEL =====================
 % One row per (EEG, clinic visit) pair, canonical-subtype patients only.
 PairTable = build_eeg_visit_pairs(Vuniq, Views.SessionLevelSpikeRates, ...
@@ -442,17 +447,29 @@ function T = build_patient_typing_from_report(R, canonical3)
 pid   = double(R.patient_id);
 etype = strtrim(string(R.epilepsy_type));
 espec = strtrim(string(R.epilepsy_specific));
+gend  = strtrim(string(R.nlp_gender));
+age = years(datetime(2000,1,1)-R.deid_birth_date);
+
 
 % ensure one epilepsy type per patient
 [uid,   etype_one] = collapse_one_per_patient(pid, etype, 'epilepsy_type'); 
 [uidS,  espec_one] = collapse_one_per_patient(pid, espec, 'epilepsy_specific');
+[uidG,  gend_one]  = collapse_one_per_patient(pid, gend,  'nlp_gender');
+[uidA, ~, gidx] = unique(pid);
+age_one = accumarray(gidx, age, [], @(v) median(v,'omitnan'));
 
 % Align on patient rather than assuming the two sets coincide.
 T = outerjoin(table(uid,  etype_one, 'VariableNames',{'Patient','EpilepsyType'}), ...
               table(uidS, espec_one, 'VariableNames',{'Patient','EpilepsySpecific'}), ...
               'Keys','Patient','MergeKeys',true);
+T = outerjoin(T, table(uidG, gend_one, 'VariableNames',{'Patient','Gender'}), ...
+              'Keys','Patient','MergeKeys',true);
+T = outerjoin(T, table(uidA, age_one, 'VariableNames',{'Patient','Age'}), ...
+              'Keys','Patient','MergeKeys',true);
 T.EpilepsyType(ismissing(T.EpilepsyType))         = "";
 T.EpilepsySpecific(ismissing(T.EpilepsySpecific)) = "";
+T.Gender(ismissing(T.Gender))                     = "";
+
 
 spec = lower(T.EpilepsySpecific);
 type = lower(T.EpilepsyType);
@@ -545,7 +562,7 @@ PatientLevelSpikeRates = table(double(pids), ...
     splitapply(@(x) mean(x,'omitnan'), SessionsFiltered.SpikeRate_perHour, g), ...
     'VariableNames', {'Patient','MeanSpikeRate_perHour'});
 PatientLevelSpikeRates = innerjoin(PatientLevelSpikeRates, ...
-    TypingFiltered(:,{'Patient','EpilepsyType','EpilepsySpecific','EpiType3'}), ...
+    TypingFiltered(:,{'Patient','EpilepsyType','EpilepsySpecific','EpiType3','Gender','Age'}), ...
     'Keys','Patient');
 
 %% --- Spearman input tables ---------------------------------------------
@@ -2705,16 +2722,8 @@ end
 function save_fig(figH, outPath)
 if strlength(string(outPath)) == 0, return; end
 if ~exist(fileparts(outPath),'dir'), mkdir(fileparts(outPath)); end
-[d, stem] = fileparts(outPath);
-
-exportgraphics(figH, outPath, 'Resolution',300);   % PNG as before
+exportgraphics(figH, outPath, 'Resolution',300);
 fprintf('Saved: %s\n', outPath);
-
-epsPath = fullfile(d, [stem '.eps']);
-exportgraphics(figH, epsPath, 'ContentType','vector', ...
-    'Resolution',600, 'BackgroundColor','white');
-fprintf('Saved: %s\n', epsPath);
-
 end
 
 %% ---- Statistics ----------------------------------------------------
@@ -2933,4 +2942,83 @@ function s = key_examples(k)
 %KEY_EXAMPLES  Up to three keys, for an error message.
 if isempty(k), s = "none"; return; end
 s = strjoin(reshape(k(1:min(3,numel(k))), 1, []), ", ");
+end
+
+function G = build_gender_cohort_matched(Views)
+%BUILD_GENDER_COHORT_MATCHED  Patient table matching the student's Python cohort.
+%
+% Differences from PatientLevelSpikeRates, each one deliberate:
+%   subtype     Focal = any focal type OR a temporal/frontal specific text
+%               (their rule; "combined generalized and focal" lands in Focal)
+%   spike rate  pooled total spikes / total duration, not the mean of per-EEG rates
+%   age         mean age at EEG across kept EEGs, not age at the deid anchor
+%   split       dynamic median of THIS cohort, >= not >
+
+S = Views.SessionsForFigures;
+R = Views.ReportForKeptSessions;
+
+%% --- Pooled spike rate per patient ---
+[g, pid] = findgroups(double(S.Patient));
+tot_spikes = splitapply(@(x) sum(x,'omitnan'), double(S.count_0_46), g);
+tot_dur    = splitapply(@(x) sum(x,'omitnan'), double(S.Duration_sec), g);
+assert(all(tot_dur > 0), '%d patients have zero total EEG duration.', nnz(tot_dur <= 0));
+G = table(pid, tot_spikes ./ tot_dur * 3600, ...
+    'VariableNames', {'Patient','SpikeRate'});
+
+%% --- Mean age at EEG ---
+eeg_dt   = as_datetime(R.start_time_deid, "yyyy-MM-dd'T'HH:mm:ss");
+birth_dt = as_datetime(R.deid_birth_date, 'yyyy-MM-dd');
+age_row  = days(eeg_dt - birth_dt) / 365.25;
+
+[ga, pida] = findgroups(double(R.Patient));
+G = innerjoin(G, table(pida, splitapply(@(x) mean(x,'omitnan'), age_row, ga), ...
+    'VariableNames', {'Patient','Age'}), 'Keys','Patient');
+
+%% --- Typing and gender ---
+G = innerjoin(G, Views.PatientLevelSpikeRates(:, ...
+    {'Patient','EpilepsyType','EpilepsySpecific','Gender'}), 'Keys','Patient');
+
+etype = lower(strtrim(string(G.EpilepsyType)));
+espec = lower(strtrim(string(G.EpilepsySpecific)));
+
+sub = strings(height(G),1);
+isFocal = contains(etype,"focal") | contains(espec,"temporal") | contains(espec,"frontal");
+isGen   = ~isFocal & ismember(etype, ["general","generalized"]);
+sub(isFocal) = "Focal";
+sub(isGen)   = "Generalized";
+G.class = categorical(sub, ["Focal","Generalized"]);
+
+%% --- Filters, in the student's order ---
+n0 = height(G);
+G = G(ismember(upper(strtrim(string(G.Gender))), ["M","F"]), :);   n1 = height(G);
+G = G(~ismissing(G.class), :);                                     n2 = height(G);
+G = G(isfinite(G.Age) & G.Age >= 18, :);                           n3 = height(G);
+fprintf('[Gender cohort] %d -> %d (sex) -> %d (subtype) -> %d (age >=18)\n', n0, n1, n2, n3);
+
+G.Sex = categorical(upper(strtrim(string(G.Gender))), ["F","M"], ["Female","Male"]);
+G.AgeGroup = discretize(G.Age, [18 40 65 Inf], ...
+    'categorical', {'18to39','40to64','65plus'});
+assert(~any(ismissing(G.AgeGroup)), '%d patients have an unbinned age.', nnz(ismissing(G.AgeGroup)));
+
+G.class = removecats(G.class);
+G.Sex   = removecats(G.Sex);
+
+%% --- Median split on this cohort ---
+med = median(G.SpikeRate, 'omitnan');
+assert(isfinite(med), 'Median spike rate is not finite.');
+G.high_spikes = double(G.SpikeRate >= med);
+fprintf('[Gender cohort] N=%d, median split at %.2f/hr, %.1f%% above\n', ...
+    height(G), med, 100*mean(G.high_spikes));
+end
+
+
+function dt = as_datetime(v, fmt)
+%AS_DATETIME  Accept either a parsed datetime column or the raw string form.
+if isdatetime(v)
+    dt = v;
+else
+    s = strtrim(string(v));
+    s(ismember(s, ["","null","[null]","<missing>"])) = missing;
+    dt = datetime(s, 'InputFormat', fmt);
+end
 end
